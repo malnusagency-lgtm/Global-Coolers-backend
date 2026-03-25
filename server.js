@@ -1,138 +1,101 @@
 const express = require('express');
 const cors = require('cors');
-const bodyParser = require('body-parser');
+const { Pool } = require('pg');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Database Connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
 // Middleware
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-// ==========================================
-// MOCK DATABASE (In-Memory Arrays)
-// ==========================================
-let mockUser = {
-  id: 'usr_123',
-  name: 'Muthoni N.',
-  role: 'resident',
-  ecoPoints: 1250,
-  co2Saved: 120, // kg
-  address: 'Kilimani, Nairobi',
-};
-
-let mockPickups = [
-  {
-    id: 'p_101',
-    date: 'Today, 2:00 PM',
-    status: 'scheduled',
-    wasteType: 'Mixed Household',
-    address: 'Kilimani, Nairobi',
-  },
-  {
-    id: 'p_102',
-    date: 'Yesterday, 9:45 AM',
-    status: 'completed',
-    wasteType: 'Plastic Recycling',
-    address: 'Kilimani, Nairobi',
-  }
-];
-
-const mockRewards = [
-  {
-    id: 'r_1',
-    title: 'Free Bus Ride',
-    cost: 500,
-    icon: 'directions_bus',
-    color: '0xFF4CAF50',
-    partner: 'NTSA',
-  },
-  {
-    id: 'r_2',
-    title: 'Supermarket Voucher',
-    cost: 1000,
-    icon: 'shopping_cart',
-    color: '0xFF2196F3',
-    partner: 'Naivas',
-  },
-  {
-    id: 'r_3',
-    title: 'Tree Planting Kit',
-    cost: 300,
-    icon: 'park',
-    color: '0xFF8BC34A',
-    partner: 'GreenBelt',
-  }
-];
-
-// ==========================================
-// API ROUTES
-// ==========================================
-
-// Global Logger
+// Logger
 app.use((req, res, next) => {
   console.log(`[${req.method}] ${req.url}`);
   next();
 });
 
-// Authentication Routes
-app.post('/api/auth/login', (req, res) => {
-  // Accept anything and return the mock user
-  res.status(200).json({
-    success: true,
-    token: 'fake-jwt-token-7x89y98z',
-    user: mockUser
-  });
+// ==========================================
+// API ROUTES
+// ==========================================
+
+// Health Check
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'UP', timestamp: new Date() });
 });
 
-app.get('/api/auth/profile', (req, res) => {
-  res.status(200).json({
-    success: true,
-    user: mockUser
-  });
+// Authentication / Profile
+app.get('/api/auth/profile/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await pool.query('SELECT * FROM profiles WHERE id = $1', [userId]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    res.status(200).json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
 });
 
 // Pickups Routes
-app.get('/api/pickups', (req, res) => {
-  res.status(200).json({
-    success: true,
-    pickups: mockPickups
-  });
+app.get('/api/pickups/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await pool.query(
+      'SELECT * FROM pickups WHERE user_id = $1 ORDER BY created_at DESC',
+      [userId]
+    );
+    res.status(200).json({ success: true, pickups: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
 });
 
-app.post('/api/pickups/schedule', (req, res) => {
-  const { date, wasteType, address } = req.body;
+app.post('/api/pickups/schedule', async (req, res) => {
+  const { userId, date, wasteType, address, photoUrl } = req.body;
   
-  const newPickup = {
-    id: `p_${Date.now()}`,
-    date: date || 'Pending',
-    status: 'scheduled',
-    wasteType: wasteType || 'General Waste',
-    address: address || mockUser.address,
-  };
-  
-  mockPickups.unshift(newPickup); // Add to the top of the queue
-  
-  res.status(201).json({
-    success: true,
-    message: 'Pickup scheduled successfully',
-    pickup: newPickup
-  });
+  if (!userId || !wasteType) {
+    return res.status(400).json({ success: false, message: 'Missing required fields' });
+  }
+
+  try {
+    const result = await pool.query(
+      'INSERT INTO pickups (user_id, date, waste_type, address, status, photo_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [userId, date, wasteType, address, 'scheduled', photoUrl]
+    );
+    res.status(201).json({ success: true, pickup: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
 });
 
 // Rewards Routes
-app.get('/api/rewards', (req, res) => {
-  res.status(200).json({
-    success: true,
-    rewards: mockRewards
-  });
+app.get('/api/rewards', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM rewards');
+    res.status(200).json({ success: true, rewards: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
 });
 
 // Start Server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`=========================================`);
-  console.log(`ðŸŒ¿ Express Backend API Running`);
-  console.log(`ðŸ“Œ Localhost: http://127.0.0.1:${PORT}`);
-  console.log(`ðŸ“Œ Android Emulator: http://10.0.2.2:${PORT}`);
+  console.log(`🌿 Global Coolers API Running on port ${PORT}`);
   console.log(`=========================================`);
 });
