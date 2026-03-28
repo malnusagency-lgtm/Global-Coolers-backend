@@ -1,18 +1,16 @@
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Database Connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
+// Initialize Supabase Client instead of direct pg connection
+// This bypasses the IPv4 deprecation on the raw Postgres port by using the robust REST API
+const supabaseUrl = process.env.SUPABASE_URL || 'https://ycbxnrobtnrjrkyaltjr.supabase.co';
+const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InljYnhucm9idG5yanJreWFsdGpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0NjAyNDAsImV4cCI6MjA5MDAzNjI0MH0.BKExjd9NoWx0A2FAYJIgSNvsqHnx13l5vYM5-hsBhno';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Middleware
 app.use(cors());
@@ -37,13 +35,19 @@ app.get('/health', (req, res) => {
 app.get('/api/auth/profile/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const result = await pool.query('SELECT * FROM profiles WHERE id = $1', [userId]);
-    if (result.rows.length === 0) {
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+
+    if (error || !profile) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    res.status(200).json({ success: true, user: result.rows[0] });
+    
+    res.status(200).json({ success: true, user: profile });
   } catch (err) {
-    console.error(err);
+    console.error('Profile Fetch Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -52,13 +56,16 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
 app.get('/api/pickups/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const result = await pool.query(
-      'SELECT * FROM pickups WHERE user_id = $1 ORDER BY created_at DESC',
-      [userId]
-    );
-    res.status(200).json({ success: true, pickups: result.rows });
+    const { data: pickups, error } = await supabase
+      .from('pickups')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json({ success: true, pickups });
   } catch (err) {
-    console.error(err);
+    console.error('Pickups Fetch Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -71,13 +78,23 @@ app.post('/api/pickups/schedule', async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
-      'INSERT INTO pickups (user_id, date, waste_type, address, status, photo_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [userId, date, wasteType, address, 'scheduled', photoUrl]
-    );
-    res.status(201).json({ success: true, pickup: result.rows[0] });
+    const { data: pickup, error } = await supabase
+      .from('pickups')
+      .insert([{
+        user_id: userId,
+        date,
+        waste_type: wasteType,
+        address,
+        status: 'scheduled',
+        photo_url: photoUrl
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json({ success: true, pickup });
   } catch (err) {
-    console.error(err);
+    console.error('Schedule Pickup Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -85,10 +102,14 @@ app.post('/api/pickups/schedule', async (req, res) => {
 // Rewards Routes
 app.get('/api/rewards', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM rewards');
-    res.status(200).json({ success: true, rewards: result.rows });
+    const { data: rewards, error } = await supabase
+      .from('rewards')
+      .select('*');
+
+    if (error) throw error;
+    res.status(200).json({ success: true, rewards: rewards || [] });
   } catch (err) {
-    console.error(err);
+    console.error('Rewards Fetch Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -103,25 +124,32 @@ app.post('/api/rewards/redeem', async (req, res) => {
 
   try {
     // Check user balance
-    const profileResult = await pool.query('SELECT eco_points FROM profiles WHERE id = $1', [userId]);
-    if (profileResult.rows.length === 0) {
+    const { data: profile, error: profileErr } = await supabase
+      .from('profiles')
+      .select('eco_points')
+      .eq('id', userId)
+      .single();
+
+    if (profileErr || !profile) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const currentPoints = profileResult.rows[0].eco_points;
+    const currentPoints = profile.eco_points || 0;
     if (currentPoints < pointsCost) {
       return res.status(400).json({ success: false, message: 'Insufficient points' });
     }
 
     // Deduct points
-    await pool.query(
-      'UPDATE profiles SET eco_points = eco_points - $1 WHERE id = $2',
-      [pointsCost, userId]
-    );
+    const { error: updateErr } = await supabase
+      .from('profiles')
+      .update({ eco_points: currentPoints - pointsCost })
+      .eq('id', userId);
+
+    if (updateErr) throw updateErr;
 
     res.status(200).json({ success: true, message: 'Reward redeemed', newBalance: currentPoints - pointsCost });
   } catch (err) {
-    console.error(err);
+    console.error('Redeem Reward Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -129,12 +157,16 @@ app.post('/api/rewards/redeem', async (req, res) => {
 // Leaderboard
 app.get('/api/leaderboard', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT id, full_name, eco_points, co2_saved FROM profiles ORDER BY eco_points DESC LIMIT 20'
-    );
-    res.status(200).json({ success: true, leaderboard: result.rows });
+    const { data: leaderboard, error } = await supabase
+      .from('profiles')
+      .select('id, full_name, eco_points, co2_saved')
+      .order('eco_points', { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
+    res.status(200).json({ success: true, leaderboard: leaderboard || [] });
   } catch (err) {
-    console.error(err);
+    console.error('Leaderboard Fetch Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -148,13 +180,23 @@ app.post('/api/reports', async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
-      'INSERT INTO reports (user_id, issue_type, location, description, photo_url, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [userId, issueType, location, description, photoUrl, 'pending']
-    );
-    res.status(201).json({ success: true, report: result.rows[0] });
+    const { data: report, error } = await supabase
+      .from('reports')
+      .insert([{
+        user_id: userId,
+        issue_type: issueType,
+        location,
+        description,
+        photo_url: photoUrl,
+        status: 'pending'
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json({ success: true, report });
   } catch (err) {
-    console.error(err);
+    console.error('Report Issue Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -165,31 +207,32 @@ app.put('/api/auth/profile/:userId', async (req, res) => {
   const { full_name, latitude, longitude } = req.body;
 
   try {
-    const updates = [];
-    const values = [];
-    let idx = 1;
+    const updates = {};
+    if (full_name !== undefined) updates.full_name = full_name;
+    if (latitude !== undefined) updates.latitude = latitude;
+    if (longitude !== undefined) updates.longitude = longitude;
 
-    if (full_name !== undefined) { updates.push(`full_name = $${idx++}`); values.push(full_name); }
-    if (latitude !== undefined) { updates.push(`latitude = $${idx++}`); values.push(latitude); }
-    if (longitude !== undefined) { updates.push(`longitude = $${idx++}`); values.push(longitude); }
-
-    if (updates.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, message: 'No fields to update' });
     }
 
-    values.push(userId);
-    const result = await pool.query(
-      `UPDATE profiles SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`,
-      values
-    );
+    const { data: updatedUser, error } = await supabase
+      .from('profiles')
+      .update(updates)
+      .eq('id', userId)
+      .select()
+      .single();
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'User not found' });
+    if (error) {
+       if (error.code === 'PGRST116') {
+           return res.status(404).json({ success: false, message: 'User not found' });
+       }
+       throw error;
     }
 
-    res.status(200).json({ success: true, user: result.rows[0] });
+    res.status(200).json({ success: true, user: updatedUser });
   } catch (err) {
-    console.error(err);
+    console.error('Update Profile Error:', err);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -197,6 +240,6 @@ app.put('/api/auth/profile/:userId', async (req, res) => {
 // Start Server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`=========================================`);
-  console.log(`🌿 Global Coolers API Running on port ${PORT}`);
+  console.log(`🌿 Global Coolers REST API Running on port ${PORT}`);
   console.log(`=========================================`);
 });
